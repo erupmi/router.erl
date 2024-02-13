@@ -1,0 +1,82 @@
+* Router Network Design
+
+** Algorithm
+
+*** Controller:
+
+- graphToNetwork: It's fairly trivial. Just sponsor node and send each node
+control message for initialization. Then, each router will start a handler
+function to handle requests.
+
+- extendNetwork: We will pass all message to the `From` node, and then spawn new
+node. After generating the new node, we send a control message with SeqNum 0 to
+update router table.
+
+*** Router:
+
+- message: It's easy, just find the name in router table and pass message
+appended by the name of current node. If the target name is the same as the name
+of current node, send a trace message to controller.
+
+- stop: Clean up resource(the table) and quit
+
+- dump: Send the content in router table to the controller
+
+- control:
+Here it's the complicated part. To guarantee that the node
+communication does not interfer each other, we will calculate two trees for
+control management. The first tree is forward tree which finds our which sub
+node could be deliver messages by current node. The second tree is backward tree
+which determines the subnodes we can receive messages from. We will use the
+coordinator as root node (that is, the first node been notified by controller)
+and then use BFS to reduce the graph to a tree. After figuring out these two
+trees, we start to propagate control messages from the root node according to
+the order of forward tree. Now we have two cases:
+  - When a node does not have sub nodes in the backward tree:
+    it will call the `ControlFun` and reply to the parent node immediately with
+    the result of `ControlFun`.
+  - When a node has sub nodes in the backward tree:
+    after getting replies from all sub nodes, the node will call `ControlFun`
+    and then reply to own parent. When the coordinator receives own replies,
+    the 1PC is over.
+Then, the first PC is over, then the coordinator determines whether to commit
+or abort according to the collected results. The decision will be propagated by
+forward tree again. If it's commit, the table will be kept along with children
+process. Otherwise, we will recover the backup table and kill the children.
+The graph to tree method helps us to identify boundary of parent nodes and sub
+nodes so the communication will not be repeated.
+The method helps us to handle timeout more easily as well. Since the controlfun
+always starts from the leaf nodes, the timeout will be a chained effect for
+parent nodes and eventually the whole tree will abort the message. We won't send
+any message to indicate whether to abort since all nodes can detect the timeout.
+For nodes that have called `ControlFun`, they will count the running time on it
+and decide reply/abort.
+
+** Extra Signals
+
+- {pcGetGraph, From, Target}: get the neighbor nodes from Target and them reply
+result to From nodes.
+
+- {pcPutGraph, SourceName, SourceID, Dest, Neighbors}: reply to Dest of the
+neighbor nodes and source PID (source ID) of SourceName node.
+
+- {lockStartPrepare, ForwardTree, BackwardTree}: tell the current node to
+prepare 2PC along with the computed ForwardTree and BackwardTree.
+
+- {doAbort}: tell the current node to abort all the changes and kill children,
+then propagate to sub nodes in forward tree
+
+- {doCommit}: tell the current node to commit changes, then propagate as well.
+
+- {lockEnd, From}: the From node has received delivered messages.
+
+- {lockControlEnd, Pid, Message}:
+  the ControlFun has executed in node with Pid, we have follwing Message:
+  - {canAbort}: tell the parent node the sub node failed at ControlFun
+  - {canCommit}: tell the parent node the sub node succeed at ControlFun
+
+- {conquer, Coordinator, TargetName, TargetSeq}
+  Communicate with all nodes to lock to target seq, if other nodes are also
+  doing the requests, the final SeqNum will be the least one, the one that
+  succeed in this operation will start pcGetGraph to change the network,
+  others will make changes from the succeed node first them attempt again.
